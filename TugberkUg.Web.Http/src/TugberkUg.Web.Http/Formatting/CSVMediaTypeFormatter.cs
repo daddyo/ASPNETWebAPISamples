@@ -1,122 +1,157 @@
 ﻿using System;
 using System.Collections;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http.Formatting;
 using System.Net.Http.Headers;
-using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace TugberkUg.Web.Http.Formatting {
 
-    public class CSVMediaTypeFormatter : MediaTypeFormatter {
+	public class CSVMediaTypeFormatter : System.Net.Http.Formatting.MediaTypeFormatter
+	{
 
-        public CSVMediaTypeFormatter() {
+		public CSVMediaTypeFormatter()
+		{
 
-            SupportedMediaTypes.Add(new MediaTypeHeaderValue("text/csv"));
-        }
-        public CSVMediaTypeFormatter(MediaTypeMapping mediaTypeMapping) : this() {
+			SupportedMediaTypes.Add(new MediaTypeHeaderValue("text/csv"));
+		}
+		public CSVMediaTypeFormatter(MediaTypeMapping mediaTypeMapping)
+			: this()
+		{
 
-            MediaTypeMappings.Add(mediaTypeMapping);
-        }
-        public CSVMediaTypeFormatter(IEnumerable<MediaTypeMapping> mediaTypeMappings) : this() {
+			MediaTypeMappings.Add(mediaTypeMapping);
+		}
+		public CSVMediaTypeFormatter(IEnumerable<MediaTypeMapping> mediaTypeMappings)
+			: this()
+		{
 
-            foreach (var mediaTypeMapping in mediaTypeMappings) {
-                MediaTypeMappings.Add(mediaTypeMapping);
-            }
-        }
+			foreach (var mediaTypeMapping in mediaTypeMappings)
+			{
+				MediaTypeMappings.Add(mediaTypeMapping);
+			}
+		}
 
-        protected override bool CanWriteType(Type type) {
+		protected override bool CanReadType(Type type)
+		{
+			if (type == null)
+				throw new ArgumentNullException("type");
 
-            if (type == null)
-                throw new ArgumentNullException("type");
+			return isTypeOfIEnumerable(type);
+		}
 
-            return isTypeOfIEnumerable(type);
-        }
+		protected override bool CanWriteType(Type type)
+		{
+			if (type == null)
+				throw new ArgumentNullException("type");
 
-        protected override Task OnWriteToStreamAsync(
-            Type type,
-            object value,
-            Stream stream,
-            HttpContentHeaders contentHeaders,
-            FormatterContext formatterContext,
-            TransportContext transportContext) {
+			return isTypeOfIEnumerable(type);
+		}
 
-            return Task.Factory.StartNew(() => {
-                writeStream(type, value, stream, contentHeaders);
-            });
-        }
+		public override Task WriteToStreamAsync(Type type, object value, Stream stream, HttpContentHeaders contentHeaders, TransportContext transportContext)
+		{
+			return Task.Factory.StartNew(() =>
+			{
+				writeStream(type, value, stream, contentHeaders);
+			});
+		}
 
-        //private utils
-        private void writeStream(Type type, object value, Stream stream, HttpContentHeaders contentHeaders) {
 
-            //NOTE: We have check the type inside CanWriteType method
-            //If request comes this far, the type is IEnumerable. We are safe.
+		#region private utils
+		private void writeStream(Type type, object value, Stream stream, HttpContentHeaders contentHeaders)
+		{
 
-            Type itemType = type.GetGenericArguments()[0];
+			//NOTE: We have check the type inside CanWriteType method
+			//If request comes this far, the type is IEnumerable. We are safe.
+			System.Diagnostics.Debug.Assert(isTypeOfIEnumerable(type));
 
-            StringWriter _stringWriter = new StringWriter();
+			Type itemType = type.GetGenericArguments()[0];
 
-            _stringWriter.WriteLine(
-                string.Join<string>(
-                    ",", itemType.GetProperties().Select(x => x.Name )
-                )
-            );
+			using (StreamWriter writer = new StreamWriter(stream))
+			{
+				try
+				{
+					/* Write header row to stream.
+					 *	TODO: consider adding flag or sim for whether header row should be generated
+					 *		Alternatively, maybe callers just start on row 1
+					 */
+					string headerLine = string.Join<string>(
+							",", itemType.GetProperties().Select(x => x.Name)
+						);
+					writer.WriteLine(headerLine);
 
-            foreach (var obj in (IEnumerable<object>)value) {
 
-                var vals = obj.GetType().GetProperties().Select(
-                    pi => new { 
-                        Value = pi.GetValue(obj, null)
-                    }
-                );
+					StringBuilder entityCsv = new StringBuilder(4 * 1024);	// 4kB buffer; TODO: use static val or config'ble
+					foreach (var obj in (IEnumerable<object>)value)
+					{
+						// Retrieve the entity values
+						var vals = obj.GetType().GetProperties().Select(
+							pi => new
+							{
+								Value = pi.GetValue(obj, null)
+							}
+						);
 
-                string _valueLine = string.Empty;
+						foreach (var val in vals)
+						{
+							if (val.Value != null)
+							{
+								// TODO: consider type oriented handlers? E.g., datetimes may need special fmt'ing
+								var _val = val.Value.ToString();
 
-                foreach (var val in vals) {
+								// TODO: consider benefits of regex for replacements below. Neg. perf impact?
+								//Check if the value contans a comma and place it in quotes if so
+								if (_val.Contains(","))
+									_val = string.Concat("\"", _val, "\"");
+								
+								//Replace any \r or \n special characters from a new line with a space
+								if (_val.Contains("\r"))
+									_val = _val.Replace("\r", " ");
+								if (_val.Contains("\n"))
+									_val = _val.Replace("\n", " ");
 
-                    if (val.Value != null) {
+								entityCsv.AppendFormat("{0},", _val);
+							}
+							else
+							{
+								// Null values represented by nothing between two commas
+								entityCsv.Append(",");
+							}
+						}
 
-                        var _val = val.Value.ToString();
+						// Now that the entity has been rendered to csv, replace the trailing comma
+						// TODO: BUGBUG: if the last value was null, the trailing comma should not be removed
+						writer.WriteLine(entityCsv.ToString(0, entityCsv.Length - 1));
+						// Clear the string buffer prior to the next row
+						entityCsv.Clear();
+					}
 
-                        //Check if the value contans a comma and place it in quotes if so
-                        if (_val.Contains(","))
-                            _val = string.Concat("\"", _val, "\"");
+				}
+				finally
+				{
+					writer.Close();
+				}
+			}
 
-                        //Replace any \r or \n special characters from a new line with a space
-                        if (_val.Contains("\r"))
-                            _val = _val.Replace("\r", " ");
-                        if (_val.Contains("\n"))
-                            _val = _val.Replace("\n", " ");
+		}
 
-                        _valueLine = string.Concat(_valueLine, _val, ",");
+		private bool isTypeOfIEnumerable(Type type)
+		{
 
-                    } else {
+			foreach (Type interfaceType in type.GetInterfaces())
+			{
 
-                        _valueLine = string.Concat(string.Empty, ",");
-                    }
-                }
+				if (interfaceType == typeof(IEnumerable))
+					return true;
+			}
 
-                _stringWriter.WriteLine(_valueLine.TrimEnd(','));
-            }
+			return false;
+		}
 
-            var streamWriter = new StreamWriter(stream);
-                streamWriter.Write(_stringWriter.ToString());
-        }
-        private bool isTypeOfIEnumerable(Type type) {
+		#endregion
 
-            foreach (Type interfaceType in type.GetInterfaces()) {
-
-                if (interfaceType == typeof(IEnumerable))
-                    return true;
-            }
-
-            return false;
-        }
-
-    }
+	}
 }
